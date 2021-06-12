@@ -33,8 +33,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // BUTTON
 const byte ledPin = LED_BUILTIN;
-const byte interruptPin = 2;
+const byte buttonPin = 2;
 volatile byte state = LOW;
+unsigned long buttonPressTimer = 0;
 
 // SOIL MOISTURE STUFF
 const int moisturePin = A2;
@@ -48,14 +49,19 @@ unsigned long soilMeasurementInterval = 2000;
 int soilMoisturePercentageMin = 100;
 unsigned long wateringTimestamp = 0;
 
+const int indicatorLedPin = 5;
+int soilMoisturePercentageThreshold = 60;
+unsigned long soilMoistureThresholdResetTimer = 0;
+
 void setup() {
   Serial.begin(9600); // open serial port, set the baud rate to 9600 bps
 
   //  button stuff
   pinMode(moisturePin, INPUT);
   pinMode(ledPin, OUTPUT);
-  pinMode(interruptPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(interruptPin), buttonPress, CHANGE);
+  pinMode(indicatorLedPin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(buttonPin), buttonPress, CHANGE);
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -74,7 +80,15 @@ void setup() {
 }
 
 void buttonPress() {
-  state = !state;
+  if (digitalRead(buttonPin) == HIGH) {
+    state = HIGH;
+    // start timers for stuff that listen for a long press
+    soilMoistureThresholdResetTimer = millis();
+  } else {
+    state = LOW;
+    // reset timers for stuff that listen for a long press
+    soilMoistureThresholdResetTimer = 0;
+  }
 }
 
 void displayMoisture(void) {
@@ -105,6 +119,22 @@ void displayTimeSinceWatering(int days, int hours, int minutes) {
 void measureMoisture(void) {
     soilMoistureValue = analogRead(moisturePin); 
     soilMoisturePercent = constrain(map(soilMoistureValue, AirValue, WaterValue, 0, 100), 0 , 100);
+    if (soilMoisturePercent <= soilMoisturePercentageThreshold) {
+      Serial.print("WARNING! Soil moisture percentage (");
+      Serial.print(soilMoisturePercent);
+      Serial.print(") is lower than threshold (");
+      Serial.print(soilMoisturePercentageThreshold);
+      Serial.println(")!");
+      digitalWrite(indicatorLedPin, HIGH);
+    } else {
+      Serial.print("Soil moisture percentage (");
+      Serial.print(soilMoisturePercent);
+      Serial.print(") is higher than threshold (");
+      Serial.print(soilMoisturePercentageThreshold);
+      Serial.println(")");
+      digitalWrite(indicatorLedPin, LOW);
+    }
+
     // Interpret a 10% increase from the minimum measurement as the sensor being watered
     if (soilMoisturePercent > soilMoisturePercentageMin + 10) {
       Serial.println("Soil has been watered!");
@@ -134,19 +164,28 @@ void time(long val){
 void loop() {
   digitalWrite(ledPin, state);
   if (state) {
-    display.ssd1306_command(SSD1306_DISPLAYON);
-    measureMoisture();
-    displayMoisture();
-    time((millis() - wateringTimestamp) / 1000);
-    display.display();
-    
-    delay(5000);
-    int button_reading = digitalRead(interruptPin);
-    Serial.print("Button value: ");
-    Serial.println((button_reading == HIGH ? "high" : "low"));
-    state = (button_reading == HIGH ? HIGH : LOW);
+    if (buttonPressTimer == 0) {
+      buttonPressTimer = millis();
+      display.ssd1306_command(SSD1306_DISPLAYON);
+      measureMoisture();
+      displayMoisture();
+      time((millis() - wateringTimestamp) / 1000);
+      display.display();
+    }
+    if (millis() - soilMoistureThresholdResetTimer > 2000) {
+      soilMoisturePercentageThreshold = soilMoisturePercent;
+      soilMoistureThresholdResetTimer = 0;
+      Serial.println("Soil moisture percentage threshold updated!");
+    }
   } else {
-    display.ssd1306_command(SSD1306_DISPLAYOFF);
+    if (buttonPressTimer) {
+      if (millis() - buttonPressTimer > 5000) {
+        display.ssd1306_command(SSD1306_DISPLAYOFF);
+        buttonPressTimer = 0;
+      }
+    } else {
+      display.ssd1306_command(SSD1306_DISPLAYOFF);
+    }
     if (millis() - soilMeasurementTimestamp > soilMeasurementInterval) {
       measureMoisture();
       soilMeasurementTimestamp = millis();
